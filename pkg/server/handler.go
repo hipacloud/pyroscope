@@ -29,9 +29,9 @@ func (ctrl *Controller) loginHandler() http.HandlerFunc {
 			return
 		}
 		mustExecute(tmpl, w, map[string]interface{}{
-			"GoogleEnabled": ctrl.config.GoogleEnabled,
-			"GithubEnabled": ctrl.config.GithubEnabled,
-			"GitlabEnabled": ctrl.config.GitlabEnabled,
+			"GoogleEnabled": ctrl.config.Google.Enabled,
+			"GithubEnabled": ctrl.config.Github.Enabled,
+			"GitlabEnabled": ctrl.config.Gitlab.Enabled,
 			"BaseURL":       ctrl.config.BaseURL,
 		})
 	}
