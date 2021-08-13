@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	golog "log"
@@ -22,6 +23,7 @@ import (
 	"github.com/pyroscope-io/pyroscope/pkg/config"
 	"github.com/pyroscope-io/pyroscope/pkg/storage"
 	"github.com/pyroscope-io/pyroscope/pkg/util/hyperloglog"
+	"github.com/pyroscope-io/pyroscope/pkg/util/updates"
 )
 
 const (
@@ -100,6 +102,7 @@ func (ctrl *Controller) mux() (http.Handler, error) {
 	protectedRoutes := []route{
 		{"/", ctrl.indexHandler()},
 		{"/render", ctrl.renderHandler},
+		{"/render-diff", ctrl.renderDiffHandler},
 		{"/labels", ctrl.labelsHandler},
 		{"/label-values", ctrl.labelValuesHandler},
 	}
@@ -269,6 +272,8 @@ func (ctrl *Controller) Start() error {
 		ErrorLog:       golog.New(w, "", 0),
 	}
 
+	updates.StartVersionUpdateLoop()
+
 	// ListenAndServe always returns a non-nil error. After Shutdown or Close,
 	// the returned error is ErrServerClosed.
 	err = ctrl.httpServer.ListenAndServe()
@@ -336,6 +341,23 @@ func (ctrl *Controller) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (ctrl *Controller) expectJSON(w http.ResponseWriter, format string) (ok bool) {
+	switch format {
+	case "json", "":
+		return true
+	default:
+		ctrl.writeInvalidParameterError(w, errUnknownFormat)
+		return false
+	}
+}
+
+func (ctrl *Controller) writeResponseJSON(w http.ResponseWriter, res interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(res); err != nil {
+		ctrl.writeJSONEncodeError(w, err)
+	}
+}
+
 func (ctrl *Controller) writeInvalidParameterError(w http.ResponseWriter, err error) {
 	ctrl.writeError(w, http.StatusBadRequest, err, "invalid parameter")
 }
@@ -349,12 +371,12 @@ func (ctrl *Controller) writeJSONEncodeError(w http.ResponseWriter, err error) {
 }
 
 func (ctrl *Controller) writeError(w http.ResponseWriter, code int, err error, msg string) {
-	logrus.WithError(err).Error(msg)
+	ctrl.log.WithError(err).Error(msg)
 	writeMessage(w, code, "%s: %q", msg, err)
 }
 
 func (ctrl *Controller) writeErrorMessage(w http.ResponseWriter, code int, msg string) {
-	logrus.Error(msg)
+	ctrl.log.Error(msg)
 	writeMessage(w, code, msg)
 }
 
