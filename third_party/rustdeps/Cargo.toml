@@ -10,7 +10,7 @@ crate-type = ["staticlib"]
 # py-spy = { path = "../../../py-spy" }
 # rbspy = { path = "../../../rbspy" }
 
-py-spy = { git = "https://github.com/pyroscope-io/py-spy", rev = "f990f0b" }
+py-spy = { git = "https://github.com/hipacloud/py-spy", rev = "fba7eab" }
 rbspy = { git = "https://github.com/pyroscope-io/rbspy", rev = "be059a6" }
 
 [patch.crates-io]
