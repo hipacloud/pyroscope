@@ -46,7 +46,7 @@ func Start(pid int, _ spy.ProfileType, _ uint32, _ bool) (spy.Spy, error) {
 	// TODO: handle this better
 	time.Sleep(1 * time.Second)
 
-	blocking := 0
+	blocking := 1
 	if Blocking {
 		blocking = 1
 	}
