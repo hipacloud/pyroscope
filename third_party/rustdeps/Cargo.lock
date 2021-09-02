@@ -981,7 +981,7 @@ dependencies = [
 [[package]]
 name = "py-spy"
 version = "0.3.3"
-source = "git+https://github.com/hipacloud/py-spy?rev=fba7eab#fba7eabcc4268ff2c531d146c0fea487011bd1f5"
+source = "git+https://github.com/hipacloud/py-spy?rev=28c95517#28c95517583494973bedbf0fe642321d0f834a00"
 dependencies = [
  "clap",
  "cpp_demangle 0.3.3",
