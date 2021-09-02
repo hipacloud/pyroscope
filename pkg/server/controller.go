@@ -2,26 +2,29 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	golog "log"
 	"net/http"
 	"net/http/pprof"
-	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt"
-	"github.com/markbates/pkger"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/oauth2"
+	metrics "github.com/slok/go-http-metrics/metrics/prometheus"
+	goHttpMetricsMiddleware "github.com/slok/go-http-metrics/middleware"
+	middlewarestd "github.com/slok/go-http-metrics/middleware/std"
 
-	"github.com/pyroscope-io/pyroscope/pkg/build"
 	"github.com/pyroscope-io/pyroscope/pkg/config"
 	"github.com/pyroscope-io/pyroscope/pkg/storage"
 	"github.com/pyroscope-io/pyroscope/pkg/util/hyperloglog"
+	"github.com/pyroscope-io/pyroscope/pkg/util/updates"
+	"github.com/pyroscope-io/pyroscope/webapp"
 )
 
 const (
@@ -48,29 +51,36 @@ type Controller struct {
 	statsMutex sync.Mutex
 	stats      map[string]int
 
-	appStats *hyperloglog.HyperLogLogPlus
+	appStats   *hyperloglog.HyperLogLogPlus
+	metricsMdw goHttpMetricsMiddleware.Middleware
 }
 
-func New(c *config.Server, s *storage.Storage, i storage.Ingester, l *logrus.Logger) (*Controller, error) {
+func New(c *config.Server, s *storage.Storage, i storage.Ingester, l *logrus.Logger, reg prometheus.Registerer) (*Controller, error) {
 	appStats, err := hyperloglog.NewPlus(uint8(18))
 	if err != nil {
 		return nil, err
 	}
 
+	mdw := goHttpMetricsMiddleware.New(goHttpMetricsMiddleware.Config{
+		Recorder: metrics.NewRecorder(metrics.Config{
+			Prefix:   "pyroscope",
+			Registry: reg,
+		}),
+	})
+
 	ctrl := Controller{
-		config:   c,
-		log:      l,
-		storage:  s,
-		ingester: i,
-		stats:    make(map[string]int),
-		appStats: appStats,
+		config:     c,
+		log:        l,
+		storage:    s,
+		ingester:   i,
+		stats:      make(map[string]int),
+		appStats:   appStats,
+		metricsMdw: mdw,
 	}
 
-	if build.UseEmbeddedAssets {
-		// for this to work you need to run `pkger` first. See Makefile for more information
-		ctrl.dir = pkger.Dir("/webapp/public")
-	} else {
-		ctrl.dir = http.Dir("./webapp/public")
+	ctrl.dir, err = webapp.Assets()
+	if err != nil {
+		return nil, err
 	}
 
 	return &ctrl, nil
@@ -94,16 +104,17 @@ func (ctrl *Controller) mux() (http.Handler, error) {
 		{"/forbidden", ctrl.forbiddenHandler()},
 		{"/assets/", ctrl.assetsFilesHandler},
 	}...)
-	addRoutes(mux, insecureRoutes, ctrl.drainMiddleware)
+	addRoutes(mux, ctrl.trackMetrics, insecureRoutes, ctrl.drainMiddleware)
 
 	// Protected routes:
 	protectedRoutes := []route{
 		{"/", ctrl.indexHandler()},
 		{"/render", ctrl.renderHandler},
+		{"/render-diff", ctrl.renderDiffHandler},
 		{"/labels", ctrl.labelsHandler},
 		{"/label-values", ctrl.labelValuesHandler},
 	}
-	addRoutes(mux, protectedRoutes, ctrl.drainMiddleware, ctrl.authMiddleware)
+	addRoutes(mux, ctrl.trackMetrics, protectedRoutes, ctrl.drainMiddleware, ctrl.authMiddleware)
 
 	// Diagnostic secure routes: must be protected but not drained.
 	diagnosticSecureRoutes := []route{
@@ -119,73 +130,14 @@ func (ctrl *Controller) mux() (http.Handler, error) {
 			{"/debug/pprof/trace", pprof.Trace},
 		}...)
 	}
-	addRoutes(mux, diagnosticSecureRoutes, ctrl.authMiddleware)
-	addRoutes(mux, []route{
+
+	addRoutes(mux, ctrl.trackMetrics, diagnosticSecureRoutes, ctrl.authMiddleware)
+	addRoutes(mux, ctrl.trackMetrics, []route{
 		{"/metrics", promhttp.Handler().ServeHTTP},
 		{"/healthz", ctrl.healthz},
 	})
 
 	return mux, nil
-}
-
-type oauthInfo struct {
-	Config  *oauth2.Config
-	AuthURL *url.URL
-	Type    int
-}
-
-func (ctrl *Controller) generateOauthInfo(oauthType int) *oauthInfo {
-	switch oauthType {
-	case oauthGoogle:
-		googleOauthInfo := &oauthInfo{
-			Config: &oauth2.Config{
-				ClientID:     ctrl.config.GoogleClientID,
-				ClientSecret: ctrl.config.GoogleClientSecret,
-				Scopes:       []string{"https://www.googleapis.com/auth/userinfo.email"},
-				Endpoint:     oauth2.Endpoint{AuthURL: ctrl.config.GoogleAuthURL, TokenURL: ctrl.config.GoogleTokenURL},
-			},
-			Type: oauthGoogle,
-		}
-		if ctrl.config.GoogleRedirectURL != "" {
-			googleOauthInfo.Config.RedirectURL = ctrl.config.GoogleRedirectURL
-		}
-
-		return googleOauthInfo
-	case oauthGithub:
-		githubOauthInfo := &oauthInfo{
-			Config: &oauth2.Config{
-				ClientID:     ctrl.config.GithubClientID,
-				ClientSecret: ctrl.config.GithubClientSecret,
-				Scopes:       []string{"read:user", "user:email"},
-				Endpoint:     oauth2.Endpoint{AuthURL: ctrl.config.GithubAuthURL, TokenURL: ctrl.config.GithubTokenURL},
-			},
-			Type: oauthGithub,
-		}
-
-		if ctrl.config.GithubRedirectURL != "" {
-			githubOauthInfo.Config.RedirectURL = ctrl.config.GithubRedirectURL
-		}
-
-		return githubOauthInfo
-	case oauthGitlab:
-		gitlabOauthInfo := &oauthInfo{
-			Config: &oauth2.Config{
-				ClientID:     ctrl.config.GitlabApplicationID,
-				ClientSecret: ctrl.config.GitlabClientSecret,
-				Scopes:       []string{"read_user"},
-				Endpoint:     oauth2.Endpoint{AuthURL: ctrl.config.GitlabAuthURL, TokenURL: ctrl.config.GitlabTokenURL},
-			},
-			Type: oauthGitlab,
-		}
-
-		if ctrl.config.GitlabRedirectURL != "" {
-			gitlabOauthInfo.Config.RedirectURL = ctrl.config.GitlabRedirectURL
-		}
-
-		return gitlabOauthInfo
-	}
-
-	return nil
 }
 
 func (ctrl *Controller) getAuthRoutes() ([]route, error) {
@@ -194,56 +146,46 @@ func (ctrl *Controller) getAuthRoutes() ([]route, error) {
 		{"/logout", ctrl.logoutHandler()},
 	}
 
-	if ctrl.config.GoogleEnabled {
-		authURL, err := url.Parse(ctrl.config.GoogleAuthURL)
+	if ctrl.config.Auth.Google.Enabled {
+		googleHandler, err := newGoogleHandler(ctrl.config.Auth.Google, ctrl.log)
 		if err != nil {
 			return nil, err
 		}
 
-		googleOauthInfo := ctrl.generateOauthInfo(oauthGoogle)
-		if googleOauthInfo != nil {
-			googleOauthInfo.AuthURL = authURL
-			authRoutes = append(authRoutes, []route{
-				{"/auth/google/login", ctrl.oauthLoginHandler(googleOauthInfo)},
-				{"/auth/google/callback", ctrl.callbackHandler("/auth/google/redirect")},
-				{"/auth/google/redirect", ctrl.callbackRedirectHandler(
-					"https://www.googleapis.com/oauth2/v2/userinfo", googleOauthInfo, ctrl.decodeGoogleCallbackResponse)},
-			}...)
-		}
+		authRoutes = append(authRoutes, []route{
+			{"/auth/google/login", ctrl.oauthLoginHandler(googleHandler)},
+			{"/auth/google/callback", ctrl.callbackHandler(googleHandler.redirectRoute)},
+			{"/auth/google/redirect", ctrl.callbackRedirectHandler(googleHandler)},
+		}...)
+
 	}
 
-	if ctrl.config.GithubEnabled {
-		authURL, err := url.Parse(ctrl.config.GithubAuthURL)
+	if ctrl.config.Auth.Github.Enabled {
+		githubHandler, err := newGithubHandler(ctrl.config.Auth.Github, ctrl.log)
 		if err != nil {
 			return nil, err
 		}
 
-		githubOauthInfo := ctrl.generateOauthInfo(oauthGithub)
-		if githubOauthInfo != nil {
-			githubOauthInfo.AuthURL = authURL
-			authRoutes = append(authRoutes, []route{
-				{"/auth/github/login", ctrl.oauthLoginHandler(githubOauthInfo)},
-				{"/auth/github/callback", ctrl.callbackHandler("/auth/github/redirect")},
-				{"/auth/github/redirect", ctrl.callbackRedirectHandler("https://api.github.com/user", githubOauthInfo, ctrl.decodeGithubCallbackResponse)},
-			}...)
-		}
+		authRoutes = append(authRoutes, []route{
+			{"/auth/github/login", ctrl.oauthLoginHandler(githubHandler)},
+			{"/auth/github/callback", ctrl.callbackHandler(githubHandler.redirectRoute)},
+			{"/auth/github/redirect", ctrl.callbackRedirectHandler(githubHandler)},
+		}...)
+
 	}
 
-	if ctrl.config.GitlabEnabled {
-		authURL, err := url.Parse(ctrl.config.GitlabAuthURL)
+	if ctrl.config.Auth.Gitlab.Enabled {
+		gitlabHandler, err := newGitlabHandler(ctrl.config.Auth.Gitlab, ctrl.log)
 		if err != nil {
 			return nil, err
 		}
 
-		gitlabOauthInfo := ctrl.generateOauthInfo(oauthGitlab)
-		if gitlabOauthInfo != nil {
-			gitlabOauthInfo.AuthURL = authURL
-			authRoutes = append(authRoutes, []route{
-				{"/auth/gitlab/login", ctrl.oauthLoginHandler(gitlabOauthInfo)},
-				{"/auth/gitlab/callback", ctrl.callbackHandler("/auth/gitlab/redirect")},
-				{"/auth/gitlab/redirect", ctrl.callbackRedirectHandler(ctrl.config.GitlabAPIURL, gitlabOauthInfo, ctrl.decodeGitLabCallbackResponse)},
-			}...)
-		}
+		authRoutes = append(authRoutes, []route{
+			{"/auth/gitlab/login", ctrl.oauthLoginHandler(gitlabHandler)},
+			{"/auth/gitlab/callback", ctrl.callbackHandler(gitlabHandler.redirectRoute)},
+			{"/auth/gitlab/redirect", ctrl.callbackRedirectHandler(gitlabHandler)},
+		}...)
+
 	}
 
 	return authRoutes, nil
@@ -268,6 +210,8 @@ func (ctrl *Controller) Start() error {
 		MaxHeaderBytes: 1 << 20,
 		ErrorLog:       golog.New(w, "", 0),
 	}
+
+	updates.StartVersionUpdateLoop()
 
 	// ListenAndServe always returns a non-nil error. After Shutdown or Close,
 	// the returned error is ErrServerClosed.
@@ -298,8 +242,15 @@ func (ctrl *Controller) drainMiddleware(next http.HandlerFunc) http.HandlerFunc 
 	}
 }
 
+func (ctrl *Controller) trackMetrics(route string) func(next http.HandlerFunc) http.HandlerFunc {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		h := middlewarestd.Handler(route, ctrl.metricsMdw, next)
+		return h.ServeHTTP
+	}
+}
+
 func (ctrl *Controller) isAuthRequired() bool {
-	return ctrl.config.GoogleEnabled || ctrl.config.GithubEnabled || ctrl.config.GitlabEnabled
+	return ctrl.config.Auth.Google.Enabled || ctrl.config.Auth.Github.Enabled || ctrl.config.Auth.Gitlab.Enabled
 }
 
 func (ctrl *Controller) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -323,7 +274,7 @@ func (ctrl *Controller) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			if token.Method.Alg() != jwt.SigningMethodHS256.Alg() {
 				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
-			return []byte(ctrl.config.JWTSecret), nil
+			return []byte(ctrl.config.Auth.JWTSecret), nil
 		})
 
 		if err != nil {
@@ -334,6 +285,26 @@ func (ctrl *Controller) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		next.ServeHTTP(w, r)
 	}
+}
+
+func (ctrl *Controller) expectJSON(format string) error {
+	switch format {
+	case "json", "":
+		return nil
+	default:
+		return errUnknownFormat
+	}
+}
+
+func (ctrl *Controller) writeResponseJSON(w http.ResponseWriter, res interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(res); err != nil {
+		ctrl.writeJSONEncodeError(w, err)
+	}
+}
+
+func (ctrl *Controller) writeInvalidMethodError(w http.ResponseWriter, err error) {
+	ctrl.writeError(w, http.StatusMethodNotAllowed, err, "method not supported")
 }
 
 func (ctrl *Controller) writeInvalidParameterError(w http.ResponseWriter, err error) {
@@ -349,12 +320,12 @@ func (ctrl *Controller) writeJSONEncodeError(w http.ResponseWriter, err error) {
 }
 
 func (ctrl *Controller) writeError(w http.ResponseWriter, code int, err error, msg string) {
-	logrus.WithError(err).Error(msg)
+	ctrl.log.WithError(err).Error(msg)
 	writeMessage(w, code, "%s: %q", msg, err)
 }
 
 func (ctrl *Controller) writeErrorMessage(w http.ResponseWriter, code int, msg string) {
-	logrus.Error(msg)
+	ctrl.log.Error(msg)
 	writeMessage(w, code, msg)
 }
 

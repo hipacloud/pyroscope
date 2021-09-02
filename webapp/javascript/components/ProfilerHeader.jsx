@@ -2,17 +2,25 @@ import React from "react";
 import clsx from "clsx";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
-  faIcicles,
+  faAlignLeft,
+  faBars,
   faColumns,
+  faIcicles,
+  faListUl,
   faTable,
 } from "@fortawesome/free-solid-svg-icons";
+import { FitModes } from "../util/fitMode"
 
 export default function ProfilerHeader({
   view,
+  viewDiff,
   handleSearchChange,
   resetStyle,
   reset,
+  updateFitMode,
+  fitMode,
   updateView,
+  updateViewDiff,
 }) {
   return (
     <div className="navbar-2">
@@ -23,6 +31,15 @@ export default function ProfilerHeader({
         onChange={handleSearchChange}
       />
       &nbsp;
+      <select
+        className="fit-mode-select"
+        value={fitMode}
+        onChange={(event) => updateFitMode(event.target.value)}
+      >
+        <option disabled>Prefer to fit</option>
+        <option value={FitModes.HEAD}>Head First</option>
+        <option value={FitModes.TAIL}>Tail First</option>
+      </select>
       <button
         type="button"
         className={clsx("btn")}
@@ -32,7 +49,37 @@ export default function ProfilerHeader({
       >
         Reset View
       </button>
+
+
       <div className="navbar-space-filler" />
+      {!viewDiff ? null : (
+        <div className="btn-group viz-switch">
+          <button
+            type="button"
+            className={clsx("btn", { active: viewDiff === "self" })}
+            onClick={() => updateViewDiff("self")}
+          >
+            <FontAwesomeIcon icon={faListUl} />
+            &nbsp;&thinsp;Self
+          </button>
+          <button
+            type="button"
+            className={clsx("btn", { active: viewDiff === "total" })}
+            onClick={() => updateViewDiff("total")}
+          >
+            <FontAwesomeIcon icon={faBars} />
+            &nbsp;&thinsp;Total
+          </button>
+          <button
+            type="button"
+            className={clsx("btn", { active: viewDiff === "diff" })}
+            onClick={() => updateViewDiff("diff")}
+          >
+            <FontAwesomeIcon icon={faAlignLeft} />
+            &nbsp;&thinsp;Diff
+          </button>
+        </div>
+      )}
       <div className="btn-group viz-switch">
         <button
           type="button"

@@ -4,14 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
-	"net/url"
 	"os"
-	"strings"
 	"text/template"
 	"time"
 
@@ -19,6 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/pyroscope-io/pyroscope/pkg/build"
+	"github.com/pyroscope-io/pyroscope/pkg/util/updates"
 )
 
 func (ctrl *Controller) loginHandler() http.HandlerFunc {
@@ -29,9 +27,9 @@ func (ctrl *Controller) loginHandler() http.HandlerFunc {
 			return
 		}
 		mustExecute(tmpl, w, map[string]interface{}{
-			"GoogleEnabled": ctrl.config.GoogleEnabled,
-			"GithubEnabled": ctrl.config.GithubEnabled,
-			"GitlabEnabled": ctrl.config.GitlabEnabled,
+			"GoogleEnabled": ctrl.config.Auth.Google.Enabled,
+			"GithubEnabled": ctrl.config.Auth.Github.Enabled,
+			"GitlabEnabled": ctrl.config.Auth.Gitlab.Enabled,
 			"BaseURL":       ctrl.config.BaseURL,
 		})
 	}
@@ -62,12 +60,13 @@ func invalidateCookie(w http.ResponseWriter, name string) {
 
 func (ctrl *Controller) logoutHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" && r.Method != "DELETE" {
-			ctrl.writeErrorMessage(w, http.StatusMethodNotAllowed, "only POST and DELETE are allowed")
-			return
+		switch r.Method {
+		case http.MethodPost, http.MethodGet:
+			invalidateCookie(w, jwtCookieName)
+			http.Redirect(w, r, "/login", http.StatusTemporaryRedirect)
+		default:
+			ctrl.writeErrorMessage(w, http.StatusMethodNotAllowed, "only POST and DELETE methods are allowed")
 		}
-		invalidateCookie(w, jwtCookieName)
-		http.Redirect(w, r, "/login", http.StatusTemporaryRedirect)
 	}
 }
 
@@ -80,60 +79,15 @@ func generateStateToken(length int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func getCallbackURL(host, configCallbackURL string, oauthType int, hasTLS bool) (string, error) {
-	if configCallbackURL != "" {
-		return configCallbackURL, nil
-	}
-
-	if host == "" {
-		return "", errors.New("host is empty")
-	}
-
-	schema := "http"
-	if hasTLS {
-		schema = "https"
-	}
-
-	switch oauthType {
-	case oauthGoogle:
-		return fmt.Sprintf("%v://%v/auth/google/callback", schema, host), nil
-	case oauthGithub:
-		return fmt.Sprintf("%v://%v/auth/github/callback", schema, host), nil
-	case oauthGitlab:
-		return fmt.Sprintf("%v://%v/auth/gitlab/callback", schema, host), nil
-	}
-
-	return "", errors.New("invalid oauth type provided")
-}
-
-func (ctrl *Controller) oauthLoginHandler(info *oauthInfo) http.HandlerFunc {
+func (ctrl *Controller) oauthLoginHandler(oh oauthHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		callbackURL, err := getCallbackURL(r.Host, info.Config.RedirectURL, info.Type, r.URL.Query().Get("tls") == "true")
-		if err != nil {
-			ctrl.log.WithError(err).Error("callbackURL parsing failed")
-			return
-		}
-
-		authURL := *info.AuthURL
-		parameters := url.Values{}
-		parameters.Add("client_id", info.Config.ClientID)
-		parameters.Add("scope", strings.Join(info.Config.Scopes, " "))
-		parameters.Add("redirect_uri", callbackURL)
-		parameters.Add("response_type", "code")
-
-		// generate state token for CSRF protection
-		state, err := generateStateToken(16)
+		authURL, err := oh.getOauthBase().buildAuthQuery(r, w)
 		if err != nil {
 			ctrl.log.WithError(err).Error("problem generating state token")
-			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
-		createCookie(w, stateCookieName, state)
-		parameters.Add("state", state)
-		authURL.RawQuery = parameters.Encode()
-
-		http.Redirect(w, r, authURL.String(), http.StatusTemporaryRedirect)
+		http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 	}
 }
 
@@ -166,69 +120,18 @@ func (ctrl *Controller) forbiddenHandler() http.HandlerFunc {
 	}
 }
 
-func (ctrl *Controller) decodeGoogleCallbackResponse(resp *http.Response) (string, error) {
-	type callbackResponse struct {
-		ID            string
-		Email         string
-		VerifiedEmail bool
-		Picture       string
-	}
-
-	var userProfile callbackResponse
-	err := json.NewDecoder(resp.Body).Decode(&userProfile)
-	if err != nil {
-		return "", err
-	}
-
-	return userProfile.Email, nil
-}
-
-func (ctrl *Controller) decodeGithubCallbackResponse(resp *http.Response) (string, error) {
-	type callbackResponse struct {
-		ID        int64
-		Email     string
-		Login     string
-		AvatarURL string
-	}
-
-	var userProfile callbackResponse
-	err := json.NewDecoder(resp.Body).Decode(&userProfile)
-	if err != nil {
-		return "", err
-	}
-
-	return userProfile.Login, nil
-}
-
-func (ctrl *Controller) decodeGitLabCallbackResponse(resp *http.Response) (string, error) {
-	type callbackResponse struct {
-		ID        int64
-		Email     string
-		Username  string
-		AvatarURL string
-	}
-
-	var userProfile callbackResponse
-	err := json.NewDecoder(resp.Body).Decode(&userProfile)
-	if err != nil {
-		return "", nil
-	}
-
-	return userProfile.Username, nil
-}
-
 func (ctrl *Controller) newJWTToken(name string) (string, error) {
 	claims := jwt.MapClaims{
 		"iat":  time.Now().Unix(),
 		"name": name,
 	}
 
-	if ctrl.config.LoginMaximumLifetimeDays > 0 {
-		claims["exp"] = time.Now().Add(time.Hour * 24 * time.Duration(ctrl.config.LoginMaximumLifetimeDays)).Unix()
+	if ctrl.config.Auth.LoginMaximumLifetimeDays > 0 {
+		claims["exp"] = time.Now().Add(time.Hour * 24 * time.Duration(ctrl.config.Auth.LoginMaximumLifetimeDays)).Unix()
 	}
 
 	jwtToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return jwtToken.SignedString([]byte(ctrl.config.JWTSecret))
+	return jwtToken.SignedString([]byte(ctrl.config.Auth.JWTSecret))
 }
 
 func (ctrl *Controller) logErrorAndRedirect(w http.ResponseWriter, r *http.Request, msg string, err error) {
@@ -241,7 +144,7 @@ func (ctrl *Controller) logErrorAndRedirect(w http.ResponseWriter, r *http.Reque
 	http.Redirect(w, r, "/forbidden", http.StatusTemporaryRedirect)
 }
 
-func (ctrl *Controller) callbackRedirectHandler(getAccountInfoURL string, info *oauthInfo, decodeResponse decodeResponseFunc) http.HandlerFunc {
+func (ctrl *Controller) callbackRedirectHandler(oh oauthHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie(stateCookieName)
 		if err != nil {
@@ -252,37 +155,16 @@ func (ctrl *Controller) callbackRedirectHandler(getAccountInfoURL string, info *
 			ctrl.logErrorAndRedirect(w, r, "invalid oauth state", nil)
 			return
 		}
-		code := r.FormValue("code")
-		if code == "" {
-			ctrl.logErrorAndRedirect(w, r, "code not found", nil)
+
+		client, err := oh.getOauthBase().generateOauthClient(r)
+		if err != nil {
+			ctrl.logErrorAndRedirect(w, r, "failed to generate oauth client", err)
 			return
 		}
 
-		callbackURL, err := getCallbackURL(r.Host, info.Config.RedirectURL, info.Type, r.URL.Query().Get("tls") == "true")
+		name, err := oh.userAuth(client)
 		if err != nil {
-			ctrl.logErrorAndRedirect(w, r, "callbackURL parsing failed", nil)
-			return
-		}
-		oauthConf := *info.Config
-		oauthConf.RedirectURL = callbackURL
-		token, err := oauthConf.Exchange(r.Context(), code)
-		if err != nil {
-			ctrl.logErrorAndRedirect(w, r, "exchanging auth code for token failed", err)
-			return
-		}
-
-		client := oauthConf.Client(r.Context(), token)
-		resp, err := client.Get(getAccountInfoURL)
-		if err != nil {
-			ctrl.logErrorAndRedirect(w, r, "failed to get oauth user info", err)
-			return
-		}
-		defer resp.Body.Close()
-
-		name, err := decodeResponse(resp)
-		if err != nil {
-			ctrl.logErrorAndRedirect(w, r, "decoding response body failed", err)
-			return
+			ctrl.logErrorAndRedirect(w, r, "failed to get user auth info", err)
 		}
 
 		tk, err := ctrl.newJWTToken(name)
@@ -311,10 +193,11 @@ func (ctrl *Controller) callbackRedirectHandler(getAccountInfoURL string, info *
 func (ctrl *Controller) indexHandler() http.HandlerFunc {
 	fs := http.FileServer(ctrl.dir)
 	return func(rw http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
+		path := r.URL.Path
+		if path == "/" {
 			ctrl.statsInc("index")
 			ctrl.renderIndexPage(rw, r)
-		} else if r.URL.Path == "/comparison" {
+		} else if path == "/comparison" || path == "/comparison-diff" {
 			ctrl.statsInc("index")
 			ctrl.renderIndexPage(rw, r)
 		} else {
@@ -378,11 +261,18 @@ func (ctrl *Controller) renderIndexPage(w http.ResponseWriter, _ *http.Request) 
 
 	w.Header().Add("Content-Type", "text/html")
 	mustExecute(tmpl, w, map[string]string{
-		"InitialState":  initialStateStr,
-		"BuildInfo":     build.JSON(),
-		"ExtraMetadata": extraMetadataStr,
-		"BaseURL":       ctrl.config.BaseURL,
+		"InitialState":      initialStateStr,
+		"BuildInfo":         build.JSON(),
+		"LatestVersionInfo": updates.LatestVersionJSON(),
+		"ExtraMetadata":     extraMetadataStr,
+		"BaseURL":           ctrl.config.BaseURL,
+		"NotificationText":  ctrl.NotificationText(),
 	})
+}
+
+func (ctrl *Controller) NotificationText() string {
+	// TODO: implement backend support for alert text
+	return ""
 }
 
 func mustExecute(t *template.Template, w io.Writer, v interface{}) {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cheggaaa/pb/v3"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
 	"github.com/pyroscope-io/pyroscope/pkg/agent"
@@ -64,7 +65,7 @@ func copyData(dbCfg *config.DbManager, srvCfg *config.Server) error {
 			"src start: %q end: %q, dst start: %q end: %q", srcSt, srcEt, dstSt, dstEt)
 	}
 
-	s, err := storage.New(srvCfg)
+	s, err := storage.New(srvCfg, prometheus.DefaultRegisterer)
 	if err != nil {
 		return err
 	}
@@ -97,11 +98,12 @@ func copyData(dbCfg *config.DbManager, srvCfg *config.Server) error {
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
 
+loop:
 	for srct := srcSt; srct.Before(srcEt); srct = srct.Add(resolution) {
 		bar.Increment()
 		select {
 		case <-sigc:
-			break
+			break loop
 		default:
 		}
 

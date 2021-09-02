@@ -8,28 +8,31 @@ const ESLintPlugin = require("eslint-webpack-plugin");
 
 const fs = require("fs");
 
-let pages = glob.sync("./webapp/templates/*.html").map((x) => path.basename(x));
-let pagePlugins = pages.map((name) => {
-  return new HtmlWebpackPlugin({
-    filename: path.resolve(__dirname, "../../webapp/public/" + name),
-    template: path.resolve(__dirname, "../../webapp/templates/" + name),
-    inject: false,
-    chunksSortMode: "none",
-    templateParameters: (compilation, assets, options) => ({
-      extra_metadata: process.env.EXTRA_METADATA
-        ? fs.readFileSync(process.env.EXTRA_METADATA)
-        : "",
-      mode: process.env.NODE_ENV,
-      webpack: compilation.getStats().toJson(),
-      compilation,
-      webpackConfig: compilation.options,
-      htmlWebpackPlugin: {
-        files: assets,
-        options,
-      },
-    }),
-  });
-});
+const pages = glob
+  .sync("./webapp/templates/*.html")
+  .map((x) => path.basename(x));
+const pagePlugins = pages.map(
+  (name) =>
+    new HtmlWebpackPlugin({
+      filename: path.resolve(__dirname, `../../webapp/public/${name}`),
+      template: path.resolve(__dirname, `../../webapp/templates/${name}`),
+      inject: false,
+      chunksSortMode: "none",
+      templateParameters: (compilation, assets, options) => ({
+        extra_metadata: process.env.EXTRA_METADATA
+          ? fs.readFileSync(process.env.EXTRA_METADATA)
+          : "",
+        mode: process.env.NODE_ENV,
+        webpack: compilation.getStats().toJson(),
+        compilation,
+        webpackConfig: compilation.options,
+        htmlWebpackPlugin: {
+          files: assets,
+          options,
+        },
+      }),
+    })
+);
 
 module.exports = {
   target: "web",
@@ -43,6 +46,7 @@ module.exports = {
     publicPath: "",
     path: path.resolve(__dirname, "../../webapp/public/assets"),
     filename: "[name].[hash].js",
+    clean: true,
   },
 
   resolve: {
@@ -175,6 +179,6 @@ module.exports = {
           to: "images",
         },
       ],
-    })
+    }),
   ],
 };

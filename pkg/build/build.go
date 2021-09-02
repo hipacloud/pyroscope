@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/pyroscope-io/pyroscope/pkg/agent/spy"
+	"github.com/pyroscope-io/pyroscope/webapp"
 )
 
 var (
@@ -20,13 +22,13 @@ var (
 	GitDirtyStr = "-1"
 	GitDirty    int
 
-	UseEmbeddedAssetsStr = "false"
-	UseEmbeddedAssets    bool
+	RbspyGitSHA  = "N/A"
+	PyspyGitSHA  = "N/A"
+	PhpspyGitSHA = "N/A"
 )
 
 func init() {
 	GitDirty, _ = strconv.Atoi(GitDirtyStr)
-	UseEmbeddedAssets = UseEmbeddedAssetsStr == "true"
 }
 
 const tmplt = `
@@ -43,6 +45,9 @@ GENERAL
 
 AGENT
   Supported Spies:    %q
+  rbspy  Git SHA:     %q
+  pyspy  Git SHA:     %q
+  phpspy Git SHA:     %q
 `
 
 func Summary() string {
@@ -55,8 +60,11 @@ func Summary() string {
 		Time,
 		GitSHA,
 		GitDirty,
-		UseEmbeddedAssets,
+		webapp.AssetsEmbedded,
 		spy.SupportedSpies,
+		RbspyGitSHA,
+		PyspyGitSHA,
+		PhpspyGitSHA,
 	)
 }
 
@@ -70,6 +78,9 @@ type buildInfoJSON struct {
 	GitSHA            string `json:"gitSHA"`
 	GitDirty          int    `json:"gitDirty"`
 	UseEmbeddedAssets bool   `json:"useEmbeddedAssets"`
+	RbspyGitSHA       string `json:"rbspyGitSHA"`
+	PyspyGitSHA       string `json:"pyspyGitSHA"`
+	PhpspyGitSHA      string `json:"phpspyGitSHA"`
 }
 
 func generateBuildInfoJSON() buildInfoJSON {
@@ -82,7 +93,10 @@ func generateBuildInfoJSON() buildInfoJSON {
 		Time:              Time,
 		GitSHA:            GitSHA,
 		GitDirty:          GitDirty,
-		UseEmbeddedAssets: UseEmbeddedAssets,
+		UseEmbeddedAssets: webapp.AssetsEmbedded,
+		RbspyGitSHA:       RbspyGitSHA,
+		PyspyGitSHA:       PyspyGitSHA,
+		PhpspyGitSHA:      PhpspyGitSHA,
 	}
 }
 
@@ -94,4 +108,17 @@ func JSON() string {
 func PrettyJSON() string {
 	b, _ := json.MarshalIndent(generateBuildInfoJSON(), "", "  ")
 	return string(b)
+}
+
+// PrometheusBuildLabels returns a map of the labels
+// that will be exposed in the build_info metric
+func PrometheusBuildLabels() prometheus.Labels {
+	return prometheus.Labels{
+		"GOOS":                runtime.GOOS,
+		"GOARCH":              runtime.GOARCH,
+		"version":             Version,
+		"time":                Time,
+		"revision":            GitSHA,
+		"use_embedded_assets": strconv.FormatBool(webapp.AssetsEmbedded),
+	}
 }

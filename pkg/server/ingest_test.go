@@ -10,6 +10,7 @@ import (
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
 	"github.com/pyroscope-io/pyroscope/pkg/config"
@@ -38,9 +39,9 @@ var _ = Describe("server", func() {
 					go func() {
 						defer GinkgoRecover()
 
-						s, err := storage.New(&(*cfg).Server)
+						s, err := storage.New(&(*cfg).Server, prometheus.NewRegistry())
 						Expect(err).ToNot(HaveOccurred())
-						c, _ := New(&(*cfg).Server, s, s, logrus.New())
+						c, _ := New(&(*cfg).Server, s, s, logrus.New(), prometheus.NewRegistry())
 						h, _ := c.mux()
 						httpServer := httptest.NewServer(h)
 						defer s.Close()
@@ -80,6 +81,7 @@ var _ = Describe("server", func() {
 							EndTime:   et,
 							Key:       sk,
 						})
+						Expect(err).ToNot(HaveOccurred())
 						Expect(gOut.Tree).ToNot(BeNil())
 						Expect(gOut.Tree.String()).To(Equal("\"foo;bar\" 2\n\"foo;baz\" 3\n"))
 

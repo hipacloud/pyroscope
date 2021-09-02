@@ -14,11 +14,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/pyroscope-io/pyroscope/pkg/agent/upstream"
 	"github.com/pyroscope-io/pyroscope/pkg/agent/upstream/remote"
 	"github.com/pyroscope-io/pyroscope/pkg/structs/transporttrie"
-	"github.com/pyroscope-io/pyroscope/pkg/util/metrics"
 	"github.com/pyroscope-io/pyroscope/pkg/util/slices"
 	"github.com/sirupsen/logrus"
 )
@@ -50,7 +51,7 @@ func waitUntilEndpointReady(url string) {
 	}
 }
 
-func startClientThread(appName string, wg *sync.WaitGroup, appFixtures []*transporttrie.Trie) {
+func startClientThread(appName string, wg *sync.WaitGroup, appFixtures []*transporttrie.Trie, runProgress prometheus.Gauge, successfulUploads prometheus.Counter, uploadErrors prometheus.Counter) {
 	rc := remote.RemoteConfig{
 		UpstreamThreads:        1,
 		UpstreamAddress:        "http://pyroscope:4040",
@@ -84,13 +85,13 @@ func startClientThread(appName string, wg *sync.WaitGroup, appFixtures []*transp
 			Trie:            t,
 		})
 		if err != nil {
-			metrics.Count("upload_errors", 1)
+			uploadErrors.Add(1)
 			time.Sleep(time.Second)
 		} else {
-			metrics.Count("successful_uploads", 1)
+			successfulUploads.Add(1)
 		}
 		atomic.AddUint64(&requestsCompleteCount, 1)
-		metrics.Gauge("run_progress", float64(requestsCompleteCount)/(float64(appsCount*requestsCount*clientsCount)))
+		runProgress.Set(float64(requestsCompleteCount) / (float64(appsCount * requestsCount * clientsCount)))
 	}
 
 	wg.Done()
@@ -192,7 +193,26 @@ func main() {
 	go http.ListenAndServe(":8081", nil)
 
 	logrus.Info("waiting for other services to load")
-	metrics.Gauge("benchmark", 0)
+
+	runProgress := promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "pyroscope",
+		Subsystem: "benchmark",
+		Name:      "progress",
+		Help:      "",
+	})
+
+	uploadErrors := promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "pyroscope",
+		Subsystem: "benchmark",
+		Name:      "upload_errors",
+		Help:      "",
+	})
+	successfulUploads := promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "pyroscope",
+		Subsystem: "benchmark",
+		Name:      "successful_uploads",
+		Help:      "",
+	})
 
 	waitUntilEndpointReady("pyroscope:4040")
 	waitUntilEndpointReady("prometheus:9090")
@@ -217,7 +237,6 @@ func main() {
 	logrus.Info("done generating fixtures")
 
 	logrus.Info("starting sending requests")
-	metrics.Gauge("benchmark", 1)
 	startTime := time.Now()
 	reportSummaryMetric("start-time", startTime.Format(timeFmt))
 	wg := sync.WaitGroup{}
@@ -227,12 +246,11 @@ func main() {
 	for i := 0; i < appsCount; i++ {
 		r.Read(appNameBuf)
 		for j := 0; j < clientsCount; j++ {
-			go startClientThread(hex.EncodeToString(appNameBuf), &wg, fixtures[i])
+			go startClientThread(hex.EncodeToString(appNameBuf), &wg, fixtures[i], runProgress, successfulUploads, uploadErrors)
 		}
 	}
 	wg.Wait()
 	logrus.Info("done sending requests")
-	metrics.Gauge("benchmark", 0)
 	reportSummaryMetric("stop-time", time.Now().Format(timeFmt))
 	reportSummaryMetric("duration", time.Since(startTime).String())
 

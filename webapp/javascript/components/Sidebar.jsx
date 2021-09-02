@@ -13,6 +13,7 @@ import {
   faColumns,
   faBell,
   faSignOutAlt,
+  faChartBar,
 } from "@fortawesome/free-solid-svg-icons";
 import { faWindowMaximize } from "@fortawesome/free-regular-svg-icons";
 import { faGithub } from "@fortawesome/free-brands-svg-icons";
@@ -44,8 +45,8 @@ function SidebarItem(props) {
   );
 }
 
-function signOut(){
-  var form = document.createElement("form");
+function signOut() {
+  const form = document.createElement("form");
 
   form.method = "POST";
   form.action = "/logout";
@@ -101,6 +102,7 @@ function Sidebar(props) {
         <button
           className={clsx({ "active-route": state.currentRoute === "/" })}
           type="button"
+          data-testid="sidebar-root"
           onClick={() => updateRoute("/")}
         >
           <FontAwesomeIcon icon={faWindowMaximize} />
@@ -111,10 +113,23 @@ function Sidebar(props) {
           className={clsx({
             "active-route": state.currentRoute === "/comparison",
           })}
+          data-testid="sidebar-comparison"
           type="button"
           onClick={() => updateRoute("/comparison")}
         >
           <FontAwesomeIcon icon={faColumns} />
+        </button>
+      </SidebarItem>
+      <SidebarItem tooltipText="Diff View">
+        <button
+          className={clsx({
+            "active-route": state.currentRoute === "/comparison-diff",
+          })}
+          type="button"
+          data-testid="sidebar-comparison-diff"
+          onClick={() => updateRoute("/comparison-diff")}
+        >
+          <FontAwesomeIcon icon={faChartBar} />
         </button>
       </SidebarItem>
       <SidebarItem tooltipText="Alerts - Coming Soon">
@@ -143,15 +158,16 @@ function Sidebar(props) {
         </a>
       </SidebarItem>
       <SidebarItem tooltipText="Keyboard Shortcuts">
-        <button onClick={showShortcutsModal} type="button" id="tests-shortcuts-btn">
+        <button
+          onClick={showShortcutsModal}
+          type="button"
+          id="tests-shortcuts-btn"
+        >
           <FontAwesomeIcon icon={faKeyboard} />
         </button>
       </SidebarItem>
       <SidebarItem tooltipText="Sign Out">
-        <button
-          type="button"
-          onClick={() => signOut()}
-        >
+        <button type="button" onClick={() => signOut()}>
           <FontAwesomeIcon icon={faSignOutAlt} />
         </button>
       </SidebarItem>
