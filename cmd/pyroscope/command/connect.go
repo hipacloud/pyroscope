@@ -12,7 +12,7 @@ func newConnectCmd(cfg *config.Exec) *cobra.Command {
 	connectCmd := &cobra.Command{
 		Use:   "connect [flags]",
 		Short: "Connect to an existing process and profile it",
-		RunE: createCmdRunFn(cfg, vpr, true, func(cmd *cobra.Command, args []string, logger config.LoggerFunc) error {
+		RunE: createCmdRunFn(cfg, vpr, false, func(cmd *cobra.Command, args []string, logger config.LoggerFunc) error {
 			return exec.Cli(cfg, args)
 		}),
 	}
