@@ -1,0 +1,9 @@
+FROM debian:11.0-slim
+
+COPY . /opt
+WORKDIR /opt
+
+RUN apt install libunwind8-dev build-essential
+RUN make install-dev-tools  
+RUN make build-rust-dependencies
+RUN make build-release
